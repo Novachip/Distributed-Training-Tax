@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Distributed training tax model</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f7f6f3; --card:#ffffff; --ink:#1a1a1a; --muted:#6b6b6b; --line:#e3e0da;
+          --a:#2563eb; --b:#d97706; --c:#dc2626; --ok:#15803d; --warn:#b45309; --bad:#b91c1c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:28px 20px 60px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin-bottom:24px; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 20px; margin-bottom:18px; }
+  .controls { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px 24px; }
+  label { display:block; font-size:12.5px; color:var(--muted); margin-bottom:2px; }
+  .val { font-weight:600; color:var(--ink); }
+  input[type=range] { width:100%; }
+  select, input[type=number] { width:100%; padding:4px 6px; border:1px solid var(--line); border-radius:6px; background:#fff; font-size:14px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; border-top:4px solid var(--muted); }
+  .card.A { border-top-color:var(--a); } .card.B { border-top-color:var(--b); } .card.C { border-top-color:var(--c); }
+  .card h3 { margin:0 0 2px; font-size:15px; }
+  .card .mode-desc { font-size:12px; color:var(--muted); margin-bottom:10px; }
+  .tax { font-size:32px; font-weight:700; margin:6px 0 10px; }
+  table.kv { width:100%; border-collapse:collapse; font-size:13px; }
+  table.kv td { padding:2.5px 0; border-bottom:1px dashed var(--line); }
+  table.kv td:last-child { text-align:right; font-weight:600; }
+  .flag { display:inline-block; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:20px; margin:8px 6px 0 0; }
+  .flag.ok { background:#dcfce7; color:var(--ok); } .flag.warn { background:#fef3c7; color:var(--warn); } .flag.bad { background:#fee2e2; color:var(--bad); }
+  .charts { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:860px){ .charts { grid-template-columns:1fr; } }
+  .chartbox { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; height:340px; }
+  details { margin-top:6px; } summary { cursor:pointer; font-weight:600; font-size:14px; }
+  .notes { font-size:13px; color:var(--muted); }
+  .notes li { margin-bottom:6px; }
+  h2 { font-size:17px; margin:26px 0 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>The distributed training tax</h1>
+  <div class="sub">How much extra compute does it cost to split a frontier training run across many sites?
+  Efficiency model calibrated to Rahman (2026), <i>Does Distributed Training Undermine Compute Governance?</i> (arXiv:2605.29359), Tables 1 &amp; 7.</div>
+
+  <div class="panel">
+    <div class="controls">
+      <div>
+        <label>Frontier run size (quality-adjusted, centralised-equivalent FLOP): <span class="val" id="v_target"></span></label>
+        <input type="range" id="target" min="0" max="100" value="0">
+      </div>
+      <div>
+        <label>Mode A — max node power: <span class="val" id="v_nodeMW"></span> MW</label>
+        <input type="range" id="nodeMW" min="5" max="300" step="5" value="25">
+      </div>
+      <div>
+        <label>Mode A — inter-site bandwidth</label>
+        <select id="bwA"><option value="10e9" selected>10 Gbps (leased line)</option><option value="40e9">40 Gbps</option><option value="100e9">100 Gbps (dark fibre)</option><option value="400e9">400 Gbps (dark fibre)</option></select>
+      </div>
+      <div>
+        <label>Critical batch size at 100B params (the assumption that decides the result)</label>
+        <select id="Bcrit0">
+          <option value="5">5M tokens (conservative)</option>
+          <option value="15" selected>15M tokens (central; matches demonstrated runs)</option>
+          <option value="30">30M tokens</option>
+          <option value="60">60M tokens (optimistic)</option>
+          <option value="250">250M tokens (speculative)</option>
+          <option value="1000">1B tokens (approaching Rahman's implicit assumption)</option>
+          <option value="4000">4B tokens (Rahman's GPT-5-scale config implies this)</option>
+        </select>
+      </div>
+      <div>
+        <label>Mode B — chips per node: <span class="val" id="v_nodeChipsB"></span> (<span id="v_nodeMWB"></span> MW)</label>
+        <input type="range" id="nodeChipsB" min="500" max="4000" step="100" value="1500">
+      </div>
+      <div>
+        <label>Mode B — bandwidth per site</label>
+        <select id="bwB"><option value="0.3e9">300 Mbps</option><option value="1e9" selected>1 Gbps (commercial)</option><option value="3e9">3 Gbps</option><option value="10e9">10 Gbps</option></select>
+      </div>
+      <div>
+        <label>Mode C — bandwidth per site</label>
+        <select id="bwC"><option value="50e6">50 Mbps</option><option value="100e6" selected>100 Mbps (consumer)</option><option value="300e6">300 Mbps</option></select>
+      </div>
+      <div>
+        <label>Mode C — node hardware (16 H100e compute)</label>
+        <select id="cHBM"><option value="1.28e12" selected>16× H100 — 1.28 TB</option><option value="2.304e12">16× GH200 — 2.3 TB</option><option value="4.0e12">50× A100 80GB — 4.0 TB</option></select>
+      </div>
+    </div>
+    <details>
+      <summary>Advanced assumptions</summary>
+      <div class="controls" style="margin-top:12px">
+        <div><label>Training time (days): <span class="val" id="v_days"></span></label><input type="range" id="days" min="30" max="365" step="5" value="90"></div>
+        <div><label>MFU: <span class="val" id="v_mfu"></span>%</label><input type="range" id="mfu" min="20" max="50" step="1" value="30"></div>
+        <div><label>Divergence base k₀ (fit: 0.07): <span class="val" id="v_k0"></span></label><input type="range" id="k0" min="0.03" max="0.12" step="0.005" value="0.07"></div>
+        <div><label>Chinchilla penalty exponent δ (fit: 0.35): <span class="val" id="v_delta"></span></label><input type="range" id="delta" min="0.2" max="0.5" step="0.05" value="0.35"></div>
+        <div><label>Activation factor per pipeline boundary: <span class="val" id="v_actF"></span></label><input type="range" id="actF" min="0.90" max="0.99" step="0.01" value="0.95"></div>
+        <div><label>Activation compression for pipeline traffic: <span class="val" id="v_actComp"></span>×</label><input type="range" id="actComp" min="8" max="128" step="8" value="32"></div>
+        <div><label>Satellite-recognisability threshold: <span class="val" id="v_satMW"></span> MW/site</label><input type="range" id="satMW" min="1" max="25" step="1" value="5"></div>
+        <div><label><input type="checkbox" id="kScale"> Optimistic: divergence penalty shrinks with model size (Charles et al. extrapolated)</label></div>
+        <div><label>Plausible covert H100e stock (M chips): <span class="val" id="v_stock"></span></label><input type="range" id="stock" min="1" max="20" step="0.5" value="5"></div>
+      </div>
+    </details>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <h2>Across the range 10²⁶ – 10²⁸ FLOP</h2>
+  <div class="charts">
+    <div class="chartbox"><canvas id="taxChart"></canvas></div>
+    <div class="chartbox"><canvas id="chipChart"></canvas></div>
+  </div>
+
+  <div class="panel" style="margin-top:18px">
+    <details open>
+      <summary>Model structure and assumptions</summary>
+      <ul class="notes">
+        <li><b>Modes.</b> A: few large datacentre-class nodes (size set by the power cap; flat DiLoCo, dedicated fibre). B: many mid-size nodes small enough to pass as ordinary commercial buildings (~1–5 MW; flat or pipeline-parallel DiLoCo, good commercial internet). C: Rahman's threat model — 16-H100 nodes below every proposed monitoring threshold, on consumer internet. Pipeline depth S (modes B, C) and sync interval H are chosen by the model to minimise the tax.</li>
+        <li><b>Tax</b> = nominal compute purchased ÷ quality-adjusted output, i.e. 1/(η·χ), following the paper: η = η_H·η_comp·η_rep·η_act, χ from Chinchilla suboptimality. The chip count, cost and power scale with the same factor.</li>
+        <li><b>Calibration.</b> η_rep = exp(−k·ln M·ln H) with k = 0.07 + 0.004·ln M reproduces all six of Rahman's Table 1 configurations within ~5% on k (inferred), and the model's total η is within ~1.3–1.6× of the paper's across Tables 1 and 7. η_H = 1 − α·log₁₀H with α ≈ 0.05 at 250B, decreasing with model size (per the paper). η_comp = 0.99 at 150× compression (Covenant-72B calibration). η_act = 0.95 per pipeline boundary. χ = max(OT, 1/OT)^−0.35 fits the paper's reported (OT, χ) pairs.</li>
+        <li><b>Pipeline transfer.</b> For pipeline depth &gt; 1, compressed activations (forward) and activation-gradients (backward) must fit within per-site bandwidth: traffic ≈ token rate × 2 × hidden-dim ÷ compression (default 32×, adjustable — a key uncertainty). If it doesn't fit, throughput degrades proportionally (comm-bound stalls waste compute). Pipeline bubbles are neglected (large per-replica batches make them small); stragglers are not modelled. This constraint is why deep pipelines over slow links don't rescue small-node modes, and why Rahman's own configurations favour shallow pipelines on tiny nodes.</li>
+        <li><b>Sync interval and batch discipline.</b> H is set to the minimum that keeps replicas compute-bound given per-site bandwidth (Streaming DiLoCo overlap; ring all-reduce; 16-bit pseudo-gradients at 150× compression). Fleet-wide tokens per step are capped at the critical batch size (default ~15M tokens at 100B params, scaling with √N — the √N form proxies for the scaling with training progress/data found by Zhang et al. 2024 and Merrill et al. 2025, since data scales with √compute); the optimiser may exceed the cap at a cost of 2/(1+f) (the McCandlish et al. steps–data trade-off — diminishing, not zero, marginal returns), or train an oversized model, at the modelled χ cost. Because H is fleet-determined under this discipline, splitting hardware into smaller nodes never helps — it only adds replicas. <b>The critical-batch dropdown is the assumption that decides the result</b>: Rahman's simulator implicitly allows unlimited batch parallelism (his GPT-5-scale configuration implies ~4 billion-token effective batches, ~100× beyond anything demonstrated, while the DiLoCo experiments his factors are calibrated on all stayed within the normal range). Setting the dropdown to 1–4B tokens approximately reproduces his regime; at demonstrated values, hidden-node distribution (modes B and C) plateaus well below the frontier.</li>
+        <li><b>The ≈1× regime is real but visible.</b> With few sites, dark-fibre bandwidth and syncs every step at critical batch, the tax approaches 1 — this is ordinary multi-campus training (cf. Sevilla &amp; Troynikov 2025, and how frontier labs already train), not covert distribution: it requires datacentre-class nodes on dedicated fibre.</li>
+        <li><b>Hardware.</b> H100e at 2×10¹⁵ FLOP/s FP8 peak; 1.2 kW/chip all-in (Colossus 1 ratio); $50k installed per chip (Rahman's cost factors); ~14 bytes/param training memory. Mode C node memory is selectable (16×H100 1.28 TB / 16×GH200 2.3 TB / 50×A100 4 TB) since Rahman's hardware optimisation favours memory-rich sub-threshold nodes. Site counts shown are rounded up to whole sites; the solver itself treats them continuously.</li>
+        <li><b>Detectability threshold.</b> The per-site "recognisable" flag is a heuristic cutoff (default 5 MW, adjustable in advanced settings), not a physical detection model — it proxies for the point where dense GPU-hall cooling infrastructure becomes legible in commercial satellite imagery (cf. Epoch's frontier-datacentre methodology). It affects labelling only, never the computed tax.</li>
+        <li><b>Caveats.</b> Everything beyond ~10²⁶ FLOP and ~16 replicas extrapolates a simulator that itself extrapolates experiments at ≤16B parameters (largest real DiLoCo-family run: Covenant-72B, 4.8×10²³ FLOP). Chinchilla-optimal data volumes at 10²⁷⁺ exceed plausibly available unique tokens — a further unmodelled penalty. Algorithmic progress (better compression, divergence control) pushes taxes down over time.</li>
+      </ul>
+    </details>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ---------- model core (mirrors tested model_core.js) ----------
+function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+
+// f: over-batching factor (batch = f x critical batch, linear efficiency penalty)
+// nMult: model size relative to Chinchilla-optimal (bigger model -> fewer, larger syncs tolerated)
+function evalConfig(mode, Cthr, S, P, f = 1, nMult = 1) {
+  const eff = P.peak * P.mfu;
+  const Tsec = P.days * 86400;
+  const chips = Cthr / (eff * Tsec);
+  const nodeChips = mode === 'A' ? P.A.nodeMW * 1e6 / P.watt
+                  : mode === 'B' ? P.B.nodeChips : P.C.nodeChips;
+  const bw = mode === 'A' ? P.A.bw : mode === 'B' ? P.B.bw : P.C.bw;
+  const nodes = chips / nodeChips;
+  const Seff = Math.max(1, Math.min(S, Math.floor(nodes) || 1));
+  const M = Math.max(1, nodes / Seff);
+  const repFlops = Seff * nodeChips * eff;
+  const nodeHBM = mode === 'C' ? P.C.hbm : nodeChips * P.hbmPerChip;
+  const Ncap = Seff * nodeHBM * P.memUtil / P.bytesPerParam;
+
+  let N = Math.min(nMult * Math.sqrt(Cthr / 120), Ncap);
+  let eta = 0.5, H = 1, etaBatch = 1;
+  for (let i = 0; i < 5; i++) {
+    const Bcrit = P.Bcrit0 * Math.sqrt(N / 1e11); // critical batch (fleet-wide tokens/step)
+    const bs = f * Bcrit / M;                     // per-replica batch; f>1 = over-parallelised
+    etaBatch = 2 / (1 + f);                       // McCandlish steps-data trade-off; diminishing, not zero, returns
+    H = Math.max(1, Math.ceil(32 * repFlops / (900 * bs * bw)));
+    const alpha = clamp(P.alpha0 * Math.pow(250e9 / N, 0.15), 0.01, 0.12);
+    const etaH = Math.max(0.5, 1 - alpha * Math.log10(Math.max(H, 1)));
+    let k = P.k0 + P.kM * Math.log(Math.max(M, 1));
+    if (P.kScale) k *= clamp(Math.pow(160e9 / N, 0.10), 0.6, 1);
+    k = clamp(k, 0.03, 0.20);
+    const etaRep = (M > 1 && H > 1) ? Math.exp(-k * Math.log(M) * Math.log(H)) : 1;
+    const etaAct = Math.pow(P.actF, Seff - 1);
+    let pipeUtil = 1;
+    if (Seff > 1) { // activation transfer (fwd + bwd, compressed) must fit per-site bandwidth
+      const hDim = Math.sqrt(N / 1400);              // dense-equivalent hidden dimension
+      const tokRate = repFlops / (6 * N);            // tokens/s per replica
+      const actBits = tokRate * (2 * hDim / P.actComp) * 8;
+      pipeUtil = Math.min(1, bw / actBits);          // comm-bound slowdown wastes compute
+    }
+    eta = etaH * P.etaComp * etaRep * etaAct * etaBatch * pipeUtil;
+    N = Math.min(nMult * Math.sqrt(Cthr * eta / 120), Ncap);
+  }
+  const Clocal = Cthr * eta;
+  const D = Clocal / (6 * N);
+  const OT = D / (20 * N);
+  const r = Math.max(OT, 1 / OT);
+  const chi = Math.pow(r, -P.delta);
+  return { Cq: Clocal * chi, eta, chi, chips, nodes, nodeChips, M, S: Seff, H, N, OT, f, nMult,
+           nodeMW: nodeChips * P.watt / 1e6, totMW: chips * P.watt / 1e6, cost: chips * P.costPerChip };
+}
+function bestAt(mode, Cthr, P) {
+  const opts = mode === 'A' ? [1] : P.ppOptions;
+  let best = null;
+  for (const S of opts)
+    for (const f of [1, 2, 4, 8, 16, 32, 64])
+      for (const nMult of [1, 2, 4]) {
+        const r = evalConfig(mode, Cthr, S, P, f, nMult);
+        if (!best || r.Cq > best.Cq) best = r;
+      }
+  return best;
+}
+function solve(mode, target, P) {
+  const lo = Math.log(target), hi = Math.log(target * 1e4), NPTS = 120;
+  let prevX = null;
+  for (let i = 0; i <= NPTS; i++) {
+    const x = Math.exp(lo + (hi - lo) * i / NPTS);
+    if (bestAt(mode, x, P).Cq >= target) {
+      let a = prevX ?? x / 1.05, b = x;
+      for (let j = 0; j < 25; j++) { const mid = Math.sqrt(a * b); if (bestAt(mode, mid, P).Cq >= target) b = mid; else a = mid; }
+      const res = bestAt(mode, b, P);
+      res.Cthr = b; res.tax = b / target; res.feasible = true;
+      return res;
+    }
+    prevX = x;
+  }
+  return { feasible: false };
+}
+
+// ---------- UI ----------
+const MODES = {
+  A: { name: 'A — Few large nodes', desc: 'Datacentre-class sites, dedicated fibre. The cheap way to distribute — and the visible one.', colour: '#2563eb' },
+  B: { name: 'B — Many hideable nodes', desc: 'Sites small enough to pass as ordinary commercial buildings, on commercial internet.', colour: '#d97706' },
+  C: { name: 'C — Sub-threshold nodes', desc: "Rahman's threat model: 16-H100 nodes below every proposed monitoring threshold.", colour: '#dc2626' },
+};
+const $ = id => document.getElementById(id);
+
+function params() {
+  const tSlider = +$('target').value;                       // 0..100 -> 1e26..1e28 log
+  const target = Math.pow(10, 26 + 2 * tSlider / 100);
+  return {
+    target,
+    mfu: +$('mfu').value / 100, days: +$('days').value,
+    peak: 2e15, watt: 1200, costPerChip: 50000,
+    hbmPerChip: 80e9, bytesPerParam: 14, memUtil: 0.95,
+    comp: 150, etaComp: 0.99, actF: +$('actF').value, actComp: +$('actComp').value,
+    Bcrit0: +$('Bcrit0').value * 1e6, delta: +$('delta').value,
+    k0: +$('k0').value, kM: 0.004, kScale: $('kScale').checked,
+    alpha0: 0.05, stockLimit: +$('stock').value * 1e6, satMW: +$('satMW').value,
+    A: { nodeMW: +$('nodeMW').value, bw: +$('bwA').value },
+    B: { nodeChips: +$('nodeChipsB').value, bw: +$('bwB').value },
+    C: { nodeChips: 16, bw: +$('bwC').value, hbm: +$('cHBM').value },
+    ppOptions: [1, 2, 4, 8, 12, 16],
+  };
+}
+const fmtE = x => { const e = Math.floor(Math.log10(x)); const mant = x / 10 ** e; return (mant >= 9.95 ? '1.0×10' + sup(e + 1) : mant.toFixed(1) + '×10' + sup(e)); };
+const sup = e => String(e).split('').map(c => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+c]).join('');
+const fmtN = x => x >= 1e6 ? (x / 1e6).toFixed(2) + ' M' : x >= 1e3 ? Math.round(x / 1e3).toLocaleString() + ' k' : Math.round(x).toLocaleString();
+const fmtMoney = x => x >= 1e12 ? '$' + (x / 1e12).toFixed(1) + ' tn' : '$' + Math.round(x / 1e9).toLocaleString() + ' bn';
+
+function cardHTML(mode, r, P) {
+  const m = MODES[mode];
+  let body;
+  if (!r.feasible) {
+    body = `<div class="tax" style="color:${m.colour}" title="No solution found up to 10,000x">&gt;10,000×</div>
+      <div class="notes">No configuration reaches this target within the searched range (up to 10,000× the centralised compute) — achievable quality plateaus below the target under these assumptions: adding hardware adds replicas and sync burden faster than it adds useful compute. Raise bandwidth, node size, or the critical-batch assumption to find where this mode becomes viable.</div>`;
+  } else {
+    const sites = Math.max(1, Math.ceil(r.nodes));
+    const pnChips = r.chips / sites;
+    const pnMW = pnChips * P.watt / 1e6;
+    const pnLabel = pnMW < 0.1 ? (pnMW*1000).toFixed(0)+' kW' : pnMW.toFixed(1)+' MW';
+    const flags = [];
+    flags.push(pnMW >= P.satMW
+      ? `<span class="flag bad">Recognisable AI-datacentre signature (${pnLabel} per site)</span>`
+      : `<span class="flag ok">Ambiguous at this size (${pnLabel} per site)</span>`);
+    flags.push(r.chips > P.stockLimit
+      ? `<span class="flag bad">Needs ${fmtN(r.chips)} chips — exceeds plausible covert stock</span>`
+      : `<span class="flag ok">${fmtN(r.chips)} chips — within assumed stock</span>`);
+    body = `<div class="tax" style="color:${m.colour}">${r.tax < 10 ? r.tax.toFixed(1) : Math.round(r.tax)}×</div>
+      <table class="kv">
+        <tr><td>Total chips (H100e)</td><td>${fmtN(r.chips)}</td></tr>
+        <tr><td>Sites</td><td>${sites.toLocaleString()}</td></tr>
+        <tr><td>Chips / site · power</td><td>${fmtN(pnChips)} · ${pnLabel}</td></tr>
+        <tr><td>Replicas M · pipeline depth S</td><td>${Math.round(r.M).toLocaleString()} · ${r.S}</td></tr>
+        <tr><td>Sync interval H</td><td>${r.H}</td></tr>
+        <tr><td>η (comms/divergence) · χ (Chinchilla)</td><td>${r.eta.toFixed(2)} · ${r.chi.toFixed(2)}</td></tr>
+        <tr><td>Model size</td><td>${(r.N / 1e12).toFixed(1)} T params</td></tr>
+        <tr><td>Total power · hardware cost</td><td>${r.totMW >= 1000 ? (r.totMW/1000).toFixed(1)+' GW' : Math.round(r.totMW)+' MW'} · ${fmtMoney(r.cost)}</td></tr>
+      </table>
+      <div>${flags.join('')}</div>`;
+  }
+  return `<div class="card ${mode}"><h3>${m.name}</h3><div class="mode-desc">${m.desc}</div>${body}</div>`;
+}
+
+let taxChart, chipChart;
+function makeCharts() {
+  const common = {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    scales: {
+      x: { type: 'logarithmic', min: 1e26, max: 1e28, title: { display: true, text: 'Run size (quality-adjusted FLOP)' },
+           ticks: { callback: v => { const l = Math.log10(v); return Number.isInteger(l) || Math.abs(l % 1 - Math.log10(3) % 1) < 0.01 ? fmtE(v) : ''; } } },
+      y: { type: 'logarithmic', title: { display: true } }
+    },
+    plugins: { legend: { position: 'bottom' } }
+  };
+  taxChart = new Chart($('taxChart'), { type: 'line', data: { datasets: [] },
+    options: JSON.parse(JSON.stringify(common)) });
+  taxChart.options.scales.y.title.text = 'Training tax (× centralised compute)';
+  taxChart.options.scales.x.ticks = common.scales.x.ticks;
+  chipChart = new Chart($('chipChart'), { type: 'line', data: { datasets: [] },
+    options: JSON.parse(JSON.stringify(common)) });
+  chipChart.options.scales.y.title.text = 'Total H100e chips required';
+  chipChart.options.scales.x.ticks = common.scales.x.ticks;
+}
+
+function recompute() {
+  const P = params();
+  $('v_target').textContent = fmtE(P.target) + ' FLOP';
+  $('v_nodeMW').textContent = P.A.nodeMW;
+  $('v_nodeChipsB').textContent = P.B.nodeChips.toLocaleString();
+  $('v_nodeMWB').textContent = (P.B.nodeChips * P.watt / 1e6).toFixed(1);
+  $('v_days').textContent = P.days; $('v_mfu').textContent = Math.round(P.mfu * 100);
+  $('v_k0').textContent = P.k0.toFixed(3); $('v_delta').textContent = P.delta.toFixed(2);
+  $('v_actF').textContent = P.actF.toFixed(2);
+  $('v_actComp').textContent = P.actComp; $('v_satMW').textContent = P.satMW;
+  $('v_stock').textContent = (P.stockLimit / 1e6).toFixed(1);
+
+  // cards at selected target
+  const results = {};
+  for (const mode of ['A', 'B', 'C']) results[mode] = solve(mode, P.target, P);
+  $('cards').innerHTML = ['A', 'B', 'C'].map(m => cardHTML(m, results[m], P)).join('');
+
+  // sweep for charts
+  const xs = []; for (let i = 0; i <= 16; i++) xs.push(Math.pow(10, 26 + i / 8));
+  const taxData = { A: [], B: [], C: [] }, chipData = { A: [], B: [], C: [] };
+  for (const x of xs) for (const mode of ['A', 'B', 'C']) {
+    const r = solve(mode, x, P);
+    taxData[mode].push({ x, y: r.feasible ? r.tax : null });
+    chipData[mode].push({ x, y: r.feasible ? r.chips : null });
+  }
+  const ds = (data, extra) => ['A', 'B', 'C'].map(m => ({
+    label: 'Mode ' + m, data: data[m], borderColor: MODES[m].colour, backgroundColor: MODES[m].colour,
+    pointRadius: 2, borderWidth: 2, spanGaps: false, ...extra }));
+  taxChart.data.datasets = ds(taxData, {});
+  chipChart.data.datasets = [...ds(chipData, {}),
+    { label: 'Assumed covert stock limit', data: xs.map(x => ({ x, y: P.stockLimit })),
+      borderColor: '#888', borderDash: [6, 4], pointRadius: 0, borderWidth: 1.5 }];
+  taxChart.update(); chipChart.update();
+}
+
+document.querySelectorAll('input, select').forEach(el => el.addEventListener('input', () => {
+  clearTimeout(window.__t); window.__t = setTimeout(recompute, 60);
+}));
+makeCharts(); recompute();
+</script>
+</body>
+</html>
