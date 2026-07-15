@@ -31,7 +31,7 @@ Two disciplines were added that Rahman's simulator omits, and they drive the res
 | 10²⁷ | 1.9× — 20 × 24 MW | unreachable | 1.01× — 145 × 1.8 MW | unreachable |
 | 10²⁸ | 1.7× — 30 × 150 MW, 100G fibre | unreachable | 2.2× — ~3,000 sites | unreachable |
 
-## What this means for the footnote
+## What this means
 
 The original claim — distribution imposes a prohibitive tax and the clusters would anyway be detectable — survives in a sharper, conditional form. Under batch-size behaviour anyone has actually demonstrated, both halves are right simultaneously: the hideable configurations plateau below the frontier regardless of spend, and the viable configurations are dozens of satellite-recognisable AI datacentres (whose minimum size grows with the frontier). The claim's exposure is a single assumption: if effective batches can scale ~100× beyond current evidence, the tax largely evaporates and the detection burden shifts from imagery to procurement — a covert actor would need ~216k smuggled H100-equivalents even then. The honest formulation is therefore not "distribution is prohibitive" but "distribution at frontier scale requires betting billions, covertly, on an unproven extrapolation of ML science that the public literature has not validated past a few percent of the required scale — and racing rivals who don't have to".
 
